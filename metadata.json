@@ -1,0 +1,8 @@
+{
+  "name": "Magic Mirror - Ad Creator",
+  "description": "A high-energy, mixed-media editorial remix station powered by Gemini. Turn raw webcam feeds into professional product advertisements.",
+  "requestFramePermissions": [
+    "camera",
+    "microphone"
+  ]
+}
