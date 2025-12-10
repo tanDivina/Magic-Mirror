@@ -17,6 +17,28 @@ const ROTATING_TEXTS = [
   "AGENCY IN A POCKET"
 ];
 
+const KineticText = ({ text }: { text: string }) => {
+  return (
+    <span 
+      className="inline-block text-transparent bg-clip-text bg-gradient-to-r from-electric via-hotpink to-highlighter drop-shadow-sm cursor-default"
+      style={{ WebkitTextStroke: '2px black' }}
+    >
+      {text.split('').map((char, i) => (
+        <span
+          key={i}
+          className={`
+            inline-block transition-transform duration-200 cubic-bezier(0.175, 0.885, 0.32, 1.275)
+            hover:scale-[1.2] hover:-translate-y-4 hover:skew-x-3
+            ${i % 2 === 0 ? 'hover:rotate-6' : 'hover:-rotate-6'}
+          `}
+        >
+          {char === ' ' ? '\u00A0' : char}
+        </span>
+      ))}
+    </span>
+  );
+};
+
 const Hero: React.FC<HeroProps> = ({ currentUser }) => {
   const [textIndex, setTextIndex] = useState(0);
 
@@ -45,12 +67,13 @@ const Hero: React.FC<HeroProps> = ({ currentUser }) => {
 
       <div className="container mx-auto px-4 z-10 flex flex-col items-center">
         <div className="text-center mb-8 max-w-4xl relative">
-          <div className="inline-block bg-electric text-white px-4 py-1 font-mono text-sm mb-4 border-2 border-black rotate-[-2deg] sticker-shadow">
+          {/* Tape Label */}
+          <div className="inline-block bg-electric/90 backdrop-blur-sm text-white px-6 py-1 font-mono text-xs font-bold mb-4 rotate-[-2deg] shadow-sm border border-white/20">
             POWERED BY GEMINI 3 PRO
           </div>
           <h1 className="font-display font-bold text-6xl md:text-8xl leading-none tracking-tighter uppercase mb-2">
             Instant <br/>
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-electric via-hotpink to-highlighter drop-shadow-sm stroke-black" style={{ WebkitTextStroke: '2px black' }}>Ad Campaign</span>
+            <KineticText text="Ad Campaign" />
           </h1>
           <p className="font-serif italic text-2xl md:text-3xl mt-4 max-w-2xl mx-auto bg-white/80 inline-block px-4 backdrop-blur-sm">
             Hold up your product. Tell the AI the vibe. Get a pro shoot instantly.

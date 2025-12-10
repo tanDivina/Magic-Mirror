@@ -60,7 +60,7 @@ const App: React.FC = () => {
         <div className="container mx-auto flex justify-between items-center">
           {/* Logo */}
           <div className="flex items-center gap-2 pointer-events-auto bg-white/80 backdrop-blur-md p-1 pr-3 rounded-full border border-black/10 shadow-sm">
-            <div className="bg-black text-white p-2 border-2 border-transparent hover:border-hotpink hover:bg-white hover:text-black transition-colors rounded-full cursor-pointer">
+            <div className="bg-black text-white p-2 border-2 border-transparent hover:border-hotpink hover:bg-white hover:text-black transition-colors rounded-full cursor-pointer animate-spin-slow">
               <Aperture className="w-6 h-6" />
             </div>
             <span className="font-display font-bold text-xl tracking-tighter uppercase hidden md:block">Magic Mirror</span>

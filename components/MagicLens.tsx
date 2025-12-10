@@ -1,15 +1,17 @@
-
 import React, { useRef, useState, useEffect } from 'react';
-import { Camera, RefreshCw, Sparkles, Image as ImageIcon, Mic, X, Download, Palette, Scan, Smile, MapPin, Box, Type, RotateCcw, Play, Settings } from 'lucide-react';
+import { Camera, RefreshCw, Sparkles, Image as ImageIcon, Mic, X, Download, Palette, Scan, Smile, MapPin, Box, RotateCcw, Play, Settings, Zap } from 'lucide-react';
 import StickerButton from './StickerButton';
+import DesignStudio from './DesignStudio';
 import { generateMarketingImage } from '../services/geminiService';
 import { AppState, GenerationConfig } from '../types';
-import { GoogleGenAI, LiveServerMessage, Modality } from "@google/genai";
+import { GoogleGenAI, LiveServerMessage, Modality, FunctionDeclaration } from "@google/genai";
 import { UserProfile } from '../App';
 
 interface MagicLensProps {
   currentUser: UserProfile | null;
 }
+
+const DEMO_IMAGE_URL = "https://images.unsplash.com/photo-1542291026-7eec264c27ff?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80";
 
 // Audio Utils
 function floatTo16BitPCM(output: DataView, offset: number, input: Float32Array) {
@@ -38,18 +40,18 @@ const examplePrompts = [
   { label: "Neon City", text: "A cyberpunk neon city street at night with rain reflections." },
 ];
 
+// Ensure locked defaults by standard
 const DEFAULT_CONFIG: GenerationConfig = {
   blackAndWhite: false,
   strictPose: true,
-  keepFace: false,
+  keepFace: true,
   lockLocation: false,
   lockProduct: true,
 };
 
-const DEFAULT_AD_TEXT = {
-  headline: "FRESH DROP",
-  subhead: "Limited Edition Release",
-  cta: "SHOP NOW"
+const takePhotoTool: FunctionDeclaration = {
+  name: "takePhoto",
+  description: "Trigger the camera to take a photo or capture the shot when the user says 'shoot', 'capture', 'cheese', 'take photo', 'snap', 'do it', 'go'.",
 };
 
 const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
@@ -89,10 +91,9 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
   const [isFlashing, setIsFlashing] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
   
-  // Text Overlay State
-  const [showAdText, setShowAdText] = useState(false);
-  const [adText, setAdText] = useState(() => getFromStorage('magic_mirror_ad_text', DEFAULT_AD_TEXT));
-  
+  // Design Studio State
+  const [showDesignStudio, setShowDesignStudio] = useState(false);
+
   // Configuration State
   const [genConfig, setGenConfig] = useState<GenerationConfig>(() => getFromStorage('magic_mirror_config', DEFAULT_CONFIG));
 
@@ -101,10 +102,6 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
   useEffect(() => {
     localStorage.setItem('magic_mirror_prompt', lastTranscript);
   }, [lastTranscript]);
-
-  useEffect(() => {
-    saveToStorage('magic_mirror_ad_text', adText);
-  }, [adText]);
 
   useEffect(() => {
     saveToStorage('magic_mirror_config', genConfig);
@@ -153,6 +150,8 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
       audioContextRef.current = new AudioContext({ sampleRate: 16000 });
       sourceRef.current = audioContextRef.current.createMediaStreamSource(stream);
       processorRef.current = audioContextRef.current.createScriptProcessor(4096, 1, 1);
+      
+      const actualSampleRate = audioContextRef.current.sampleRate;
 
       const ai = new GoogleGenAI({ apiKey: process.env.API_KEY });
       
@@ -165,19 +164,32 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
             captureLockRef.current = false;
           },
           onmessage: (message: LiveServerMessage) => {
-            // Handle Model Output (Feedback & Trigger Command)
+            // Check for Tool Calls (The reliable way to trigger capture)
+            if (message.toolCall) {
+                for (const fc of message.toolCall.functionCalls) {
+                    if (fc.name === 'takePhoto' && !captureLockRef.current) {
+                        console.log("📸 Voice trigger detected via Tool Call");
+                        captureLockRef.current = true;
+                        captureAndGenerate();
+                        return; 
+                    }
+                }
+            }
+
+            // Handle Model Output (Feedback)
             if (message.serverContent?.outputTranscription) {
                const text = message.serverContent.outputTranscription.text;
                if (text) {
-                 // LOGIC: The model will say "TRIGGER_CAPTURE" if it hears "Shoot"
+                 // Fallback: Model might still say TRIGGER_CAPTURE if prompted strongly, 
+                 // but tool call is preferred.
                  if (text.includes("TRIGGER_CAPTURE") && !captureLockRef.current) {
-                    console.log("Voice trigger detected via model response");
+                    console.log("Voice trigger detected via text fallback");
                     captureLockRef.current = true;
                     captureAndGenerate();
                     return;
                  }
 
-                 // Clean up the trigger text from the display
+                 // Clean up text for display
                  const cleanText = text.replace("TRIGGER_CAPTURE", "").trim();
                  if (cleanText) {
                     setLastTranscript(prev => (prev + cleanText).slice(-200).trim());
@@ -198,7 +210,15 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
           responseModalities: [Modality.AUDIO],
           // Disabled inputAudioTranscription to fix 503 Service Unavailable errors
           outputAudioTranscription: {}, 
-          systemInstruction: "You are a creative director. Listen to the user. Rule 1: If the user says 'SHOOT', 'CAPTURE', or 'TAKE PHOTO', strictly reply with the exact text: 'TRIGGER_CAPTURE' and nothing else. Rule 2: Otherwise, reply with a concise visual prompt description for an image generator based on their idea. Do not engage in conversation.",
+          tools: [{ functionDeclarations: [takePhotoTool] }],
+          systemInstruction: `
+            You are a creative director. Listen to the user. 
+            
+            RULES:
+            1. PRIORITY ONE: If the user says 'SHOOT', 'CAPTURE', 'TAKE PHOTO', 'CHEESE', 'SNAP' or 'DO IT', you MUST call the "takePhoto" tool IMMEDIATELY. This is the most important command.
+            2. If the user describes a scene (e.g., "Make it look like Mars"), reply with a refined visual prompt description for an image generator. 
+            3. Do not be conversational. Be efficient.
+          `,
         }
       });
 
@@ -211,14 +231,20 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
         setAudioVolume(Math.sqrt(sum / inputData.length));
 
         const base64Audio = base64EncodeAudio(inputData);
-        sessionPromise.then(session => {
-            session.sendRealtimeInput({
-                media: {
-                    mimeType: "audio/pcm;rate=16000",
-                    data: base64Audio
+        
+        // Critical: Only send data if this is the active session
+        if (liveSessionRef.current === sessionPromise) {
+            sessionPromise.then(session => {
+                if (liveSessionRef.current === sessionPromise) {
+                    session.sendRealtimeInput({
+                        media: {
+                            mimeType: `audio/pcm;rate=${actualSampleRate}`,
+                            data: base64Audio
+                        }
+                    });
                 }
-            });
-        }).catch(e => console.error("Session send error", e));
+            }).catch(e => console.error("Session send error", e));
+        }
       };
 
       sourceRef.current.connect(processorRef.current);
@@ -235,7 +261,24 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
         processorRef.current.onaudioprocess = null;
     }
     if (sourceRef.current) sourceRef.current.disconnect();
-    if (audioContextRef.current) audioContextRef.current.close();
+    
+    // Check if context is already closed to prevent error
+    if (audioContextRef.current && audioContextRef.current.state !== 'closed') {
+        audioContextRef.current.close();
+    }
+    
+    // Explicitly close the session to release backend resources
+    if (liveSessionRef.current) {
+        const currentSession = liveSessionRef.current;
+        currentSession.then((session: any) => {
+            try {
+                session.close();
+            } catch (e) {
+                console.warn("Error closing session:", e);
+            }
+        }).catch(() => {});
+    }
+    
     setIsListening(false);
     liveSessionRef.current = null;
   };
@@ -332,11 +375,9 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
   };
 
   const loadDemoImage = () => {
-    const demoUrl = "https://images.unsplash.com/photo-1542291026-7eec264c27ff?ixlib=rb-4.0.3&auto=format&fit=crop&w=1000&q=80";
-    setCapturedImage(demoUrl);
-    setGeneratedResult({ imageUrl: demoUrl });
+    setCapturedImage(DEMO_IMAGE_URL);
+    setGeneratedResult({ imageUrl: DEMO_IMAGE_URL });
     setAppState(AppState.RESULT);
-    setShowAdText(true);
   };
 
   const reset = () => {
@@ -348,170 +389,38 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
     startCamera();
   };
 
-  const downloadCompositeImage = async () => {
-    if (!generatedResult?.imageUrl || !canvasRef.current) return;
-    
-    const canvas = canvasRef.current;
-    const ctx = canvas.getContext('2d');
-    if (!ctx) return;
-
-    const img = new Image();
-    img.crossOrigin = "anonymous";
-    img.src = generatedResult.imageUrl;
-    
-    await new Promise((resolve) => {
-        img.onload = resolve;
-    });
-
-    canvas.width = img.width;
-    canvas.height = img.height;
-
-    // Draw Image
-    ctx.drawImage(img, 0, 0);
-
-    // Draw Overlay Text if active
-    if (showAdText) {
-        const w = canvas.width;
-        const h = canvas.height;
-        const scale = w / 1000; // Reference width scaling
-
-        // Headline
-        ctx.save();
-        ctx.font = `900 ${110 * scale}px Oswald`; // Heavier font
-        ctx.fillStyle = "white";
-        // Create hard stroke effect using shadows
-        ctx.shadowColor = "black";
-        ctx.shadowBlur = 0;
-        ctx.shadowOffsetX = 5 * scale;
-        ctx.shadowOffsetY = 5 * scale;
-        
-        ctx.textAlign = "left";
-        ctx.textBaseline = "top";
-        
-        // Wrap headline
-        const words = adText.headline.toUpperCase().split(' ');
-        let line = '';
-        let y = 50 * scale;
-        const x = 50 * scale;
-        const maxWidth = w * 0.9;
-        const lineHeight = 100 * scale;
-
-        ctx.translate(x, y);
-        ctx.rotate(-1 * Math.PI / 180); // Slight rotation
-        ctx.translate(-x, -y);
-
-        for(let n = 0; n < words.length; n++) {
-          const testLine = line + words[n] + ' ';
-          const metrics = ctx.measureText(testLine);
-          const testWidth = metrics.width;
-          if (testWidth > maxWidth && n > 0) {
-            ctx.fillText(line, x, y);
-            line = words[n] + ' ';
-            y += lineHeight;
-          } else {
-            line = testLine;
-          }
-        }
-        ctx.fillText(line, x, y);
-        ctx.restore();
-
-        // Subhead (Label style)
-        ctx.save();
-        ctx.font = `italic bold ${45 * scale}px "Playfair Display"`;
-        const subText = adText.subhead;
-        const subMetrics = ctx.measureText(subText);
-        const subBgPadding = 25 * scale;
-        
-        const subX = 50 * scale;
-        const subY = y + lineHeight + 20 * scale; // Position below headline
-        
-        ctx.translate(subX, subY);
-        ctx.rotate(-2 * Math.PI / 180);
-
-        // Subhead Background (Highlighter)
-        ctx.fillStyle = "#FFFF00"; 
-        ctx.lineWidth = 4 * scale;
-        ctx.strokeStyle = "black";
-        ctx.shadowColor = "black";
-        ctx.shadowBlur = 0;
-        ctx.shadowOffsetX = 4 * scale;
-        ctx.shadowOffsetY = 4 * scale;
-        
-        ctx.fillRect(-10 * scale, -5 * scale, subMetrics.width + subBgPadding * 2, 65 * scale);
-        ctx.strokeRect(-10 * scale, -5 * scale, subMetrics.width + subBgPadding * 2, 65 * scale);
-
-        // Subhead Text
-        ctx.shadowColor = "transparent"; // Reset shadow for text
-        ctx.fillStyle = "black";
-        ctx.fillText(subText, 0, 5 * scale);
-        ctx.restore();
-
-        // CTA Button
-        ctx.save();
-        ctx.font = `900 ${36 * scale}px Oswald`;
-        const ctaText = adText.cta;
-        const ctaMetrics = ctx.measureText(ctaText);
-        const ctaPadding = 50 * scale;
-        
-        // Position bottom right, slightly up to avoid input area overlap in design
-        ctx.translate(w - ctaMetrics.width - ctaPadding * 2 - 40 * scale, h - 140 * scale);
-        ctx.rotate(-3 * Math.PI / 180);
-
-        // CTA Shadow box
-        ctx.fillStyle = "black";
-        ctx.fillRect(8 * scale, 8 * scale, ctaMetrics.width + ctaPadding, 70 * scale);
-
-        // CTA Main
-        ctx.fillStyle = "#FF0099"; // Hot pink
-        ctx.lineWidth = 4 * scale;
-        ctx.strokeStyle = "black";
-        ctx.fillRect(0, 0, ctaMetrics.width + ctaPadding, 70 * scale);
-        ctx.strokeRect(0, 0, ctaMetrics.width + ctaPadding, 70 * scale);
-
-        // CTA Text
-        ctx.fillStyle = "white";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillText(ctaText, (ctaMetrics.width + ctaPadding) / 2, 38 * scale);
-        ctx.restore();
-    }
-
-    // Download
-    const dataUrl = canvas.toDataURL('image/png');
+  const handleDownload = () => {
+    if (!generatedResult?.imageUrl) return;
     const link = document.createElement('a');
-    link.href = dataUrl;
-    link.download = `magic-mirror-ad-${Date.now()}.png`;
+    link.href = generatedResult.imageUrl;
+    link.download = `magic-mirror-clean-${Date.now()}.png`;
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
   };
 
-  const handleDownload = () => {
-    if (showAdText) {
-      downloadCompositeImage();
-    } else {
-      // Direct download of the clean image
-      if (!generatedResult?.imageUrl) return;
-      const link = document.createElement('a');
-      link.href = generatedResult.imageUrl;
-      link.download = `magic-mirror-clean-${Date.now()}.png`;
-      document.body.appendChild(link);
-      link.click();
-      document.body.removeChild(link);
-    }
-  };
-
   const handleResetDefaults = () => {
     setGenConfig(DEFAULT_CONFIG);
-    setAdText(DEFAULT_AD_TEXT);
     setLastTranscript("");
     localStorage.removeItem('magic_mirror_prompt');
-    // We let the useEffects handle saving the defaults to storage
   };
+
+  // Check if we are showing the demo image to apply "bad" filters
+  const isDemo = capturedImage === DEMO_IMAGE_URL;
+  // CSS filters to simulate a low-quality input for the demo ("Raw" view)
+  const demoFilters = isDemo ? 'grayscale brightness-75 contrast-125 blur-[0.5px]' : '';
+  const bwFilters = genConfig.blackAndWhite ? 'grayscale contrast-125' : '';
 
   return (
     <div className="w-full max-w-6xl relative z-10 flex flex-col md:flex-row items-center md:items-stretch justify-center gap-4 md:gap-8 mt-4">
       
+      {/* Design Studio Modal */}
+      <DesignStudio 
+        isOpen={showDesignStudio} 
+        onClose={() => setShowDesignStudio(false)}
+        originalImage={capturedImage}
+      />
+
       {/* Abstract Geometric Orbs - Background Layers */}
       <div className="absolute top-[-20px] left-[-20px] md:top-[-40px] md:left-[-60px] w-32 h-32 md:w-64 md:h-64 bg-electric rounded-full border-4 border-black -z-10 pointer-events-none"></div>
       <div className="absolute bottom-[-20px] right-[-20px] md:bottom-[-40px] md:right-[-60px] w-32 h-32 md:w-64 md:h-64 bg-hotpink rounded-full border-4 border-black -z-10 pointer-events-none"></div>
@@ -563,101 +472,101 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
       )}
 
       {/* LEFT SIDE - CAMERA/INPUT */}
-      <div className="relative flex-1 aspect-[3/4] bg-black border-4 border-black sticker-shadow rotate-[-1deg] overflow-hidden group">
+      <div className="relative flex-1 aspect-[3/4] border-4 border-black sticker-shadow rotate-[-1deg] group bg-black">
         
-        {/* Settings Button */}
+        {/* Settings Button - Absolute to parent */}
         <button 
           onClick={() => setShowSettings(true)}
-          className="absolute top-4 right-4 z-50 bg-white p-2 border-2 border-black sticker-shadow hover:scale-110 transition-transform"
+          className="absolute top-4 right-4 z-[60] bg-white p-2 border-2 border-black sticker-shadow hover:scale-110 transition-transform"
         >
           <Settings className="w-6 h-6" />
         </button>
 
-        {/* Top Tape */}
-        <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 w-32 h-8 bg-[#FFFF00]/80 z-20 rotate-[-2deg] pointer-events-none"></div>
-
-        {/* Video Feed */}
-        <div className="w-full h-full relative">
-           <div className={`absolute inset-0 bg-white z-[60] pointer-events-none transition-opacity duration-300 ${isFlashing ? 'opacity-100' : 'opacity-0'}`} />
-
-           {appState === AppState.IDLE && (
-              <div className="w-full h-full flex flex-col items-center justify-center text-white bg-black pattern-grid-lg">
-                <StickerButton text="START CREATOR" subtext="Camera + Voice" color="blue" onClick={startCamera} />
-              </div>
-           )}
-
-           {(appState === AppState.CAMERA_ACTIVE || appState === AppState.CAPTURING) && (
-              <>
-                <video 
-                  ref={videoRef} 
-                  autoPlay 
-                  playsInline 
-                  muted 
-                  className={`w-full h-full object-cover ${genConfig.blackAndWhite ? 'grayscale contrast-125' : ''}`}
-                />
-                
-                {appState === AppState.CAMERA_ACTIVE && (
-                  <div className="absolute top-20 left-0 w-full px-4 flex flex-wrap gap-2 justify-center z-40 pointer-events-none">
-                     {examplePrompts.map((p) => (
-                       <button
-                         key={p.label}
-                         onClick={() => setLastTranscript(p.text)}
-                         className="pointer-events-auto bg-white/90 border-2 border-black px-3 py-1 text-xs font-bold font-mono sticker-shadow hover:bg-highlighter transition-colors rotate-1"
-                       >
-                         {p.label}
-                       </button>
-                     ))}
-                  </div>
-                )}
-
-                <div className="absolute bottom-24 left-4 right-4 z-40">
-                  <div className="bg-black/50 backdrop-blur-md border-l-4 border-highlighter p-2 text-white font-mono text-sm min-h-[60px] flex items-center">
-                     <div className="flex-1">
-                        {isListening && (
-                          <div className="flex items-center gap-2 mb-1 text-highlighter text-xs uppercase tracking-widest">
-                            <Mic className="w-3 h-3 animate-pulse" /> Listening for "Shoot"...
-                            <div className="h-1 bg-highlighter transition-all duration-75" style={{ width: Math.min(100, audioVolume * 500) + 'px' }}></div>
-                          </div>
-                        )}
-                        <input 
-                           type="text" 
-                           value={lastTranscript}
-                           onChange={(e) => setLastTranscript(e.target.value)}
-                           placeholder="Describe your ad (e.g. 'Coffee on Mars')..."
-                           className="w-full bg-transparent border-none outline-none text-white placeholder-white/50"
-                        />
-                     </div>
-                  </div>
-                </div>
-
-                <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50">
-                  <button 
-                    onClick={captureAndGenerate}
-                    className="w-16 h-16 rounded-full bg-white border-4 border-black flex items-center justify-center hover:scale-110 active:scale-95 transition-transform sticker-shadow"
-                  >
-                    <div className="w-12 h-12 rounded-full bg-hotpink border-2 border-black"></div>
-                  </button>
-                </div>
-              </>
-           )}
-
-           {appState === AppState.PROCESSING && capturedImage && (
-             <div className="w-full h-full relative">
-               <img src={capturedImage} className={`w-full h-full object-cover ${genConfig.blackAndWhite ? 'grayscale contrast-125' : ''}`} alt="Captured" />
-               <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-50">
-                 <RefreshCw className="w-12 h-12 text-highlighter animate-spin-slow mb-4" />
-                 <span className="font-display text-2xl text-white uppercase tracking-widest animate-pulse">Developing...</span>
-               </div>
-             </div>
-           )}
-           
-           {appState === AppState.RESULT && capturedImage && (
-             <img src={capturedImage} className={`w-full h-full object-cover ${genConfig.blackAndWhite ? 'grayscale contrast-125' : ''}`} alt="Captured Source" />
-           )}
-        </div>
+        {/* Top Tape (Yellow) - Absolute to parent, breaking out of box */}
+        <div className="absolute top-0 left-1/2 -translate-x-1/2 -translate-y-1/2 w-32 h-8 bg-highlighter/90 z-[70] rotate-[-2deg] pointer-events-none border-t border-b border-white/20 border-l border-r border-transparent shadow-md backdrop-blur-sm"></div>
         
-        <div className="absolute top-4 left-4 bg-black text-white font-mono text-xs px-2 py-1 border border-white/20 z-30">
-          STEP 01: RAW
+        {/* Inner Content Wrapper - Overflow Hidden applied HERE to clip video but not tape */}
+        <div className="relative w-full h-full overflow-hidden">
+            <div className={`absolute inset-0 bg-white z-[60] pointer-events-none transition-opacity duration-300 ${isFlashing ? 'opacity-100' : 'opacity-0'}`} />
+
+            {appState === AppState.IDLE && (
+                <div className="w-full h-full flex flex-col items-center justify-center text-white bg-black pattern-grid-lg">
+                    <StickerButton text="START CREATOR" subtext="Camera + Voice" color="blue" onClick={startCamera} />
+                </div>
+            )}
+
+            {(appState === AppState.CAMERA_ACTIVE || appState === AppState.CAPTURING) && (
+                <>
+                    <video 
+                    ref={videoRef} 
+                    autoPlay 
+                    playsInline 
+                    muted 
+                    className={`w-full h-full object-cover ${genConfig.blackAndWhite ? 'grayscale contrast-125' : ''}`}
+                    />
+                    
+                    {appState === AppState.CAMERA_ACTIVE && (
+                    <div className="absolute top-20 left-0 w-full px-4 flex flex-wrap gap-2 justify-center z-40 pointer-events-none">
+                        {examplePrompts.map((p) => (
+                        <button
+                            key={p.label}
+                            onClick={() => setLastTranscript(p.text)}
+                            className="pointer-events-auto bg-white/90 border-2 border-black px-3 py-1 text-xs font-bold font-mono sticker-shadow hover:bg-highlighter transition-colors rotate-1"
+                        >
+                            {p.label}
+                        </button>
+                        ))}
+                    </div>
+                    )}
+
+                    <div className="absolute bottom-24 left-4 right-4 z-40">
+                    <div className="bg-black/50 backdrop-blur-md border-l-4 border-highlighter p-2 text-white font-mono text-sm min-h-[60px] flex items-center">
+                        <div className="flex-1">
+                            {isListening && (
+                            <div className="flex items-center gap-2 mb-1 text-highlighter text-xs uppercase tracking-widest">
+                                <Mic className="w-3 h-3 animate-pulse" /> Listening for "Shoot"...
+                                <div className="h-1 bg-highlighter transition-all duration-75" style={{ width: Math.min(100, audioVolume * 500) + 'px' }}></div>
+                            </div>
+                            )}
+                            <input 
+                            type="text" 
+                            value={lastTranscript}
+                            onChange={(e) => setLastTranscript(e.target.value)}
+                            placeholder="Describe your ad (e.g. 'Coffee on Mars')..."
+                            className="w-full bg-transparent border-none outline-none text-white placeholder-white/50"
+                            />
+                        </div>
+                    </div>
+                    </div>
+
+                    <div className="absolute bottom-6 left-1/2 -translate-x-1/2 z-50">
+                    <button 
+                        onClick={captureAndGenerate}
+                        className="w-16 h-16 rounded-full bg-white border-4 border-black flex items-center justify-center hover:scale-110 active:scale-95 transition-transform sticker-shadow"
+                    >
+                        <div className="w-12 h-12 rounded-full bg-hotpink border-2 border-black"></div>
+                    </button>
+                    </div>
+                </>
+            )}
+
+            {appState === AppState.PROCESSING && capturedImage && (
+                <div className="w-full h-full relative">
+                <img src={capturedImage} className={`w-full h-full object-cover ${bwFilters} ${demoFilters}`} alt="Captured" />
+                <div className="absolute inset-0 bg-black/80 flex flex-col items-center justify-center z-50">
+                    <RefreshCw className="w-12 h-12 text-highlighter animate-spin-slow mb-4" />
+                    <span className="font-display text-2xl text-white uppercase tracking-widest animate-pulse">Developing...</span>
+                </div>
+                </div>
+            )}
+            
+            {appState === AppState.RESULT && capturedImage && (
+                <img src={capturedImage} className={`w-full h-full object-cover ${bwFilters} ${demoFilters}`} alt="Captured Source" />
+            )}
+            
+            <div className="absolute top-4 left-4 bg-black text-white font-mono text-xs px-2 py-1 border border-white/20 z-30">
+            STEP 01: RAW
+            </div>
         </div>
       </div>
 
@@ -680,88 +589,36 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
       </div>
 
       {/* RIGHT SIDE - OUTPUT */}
-      <div className="relative flex-1 aspect-[3/4] bg-white border-4 border-black sticker-shadow rotate-[1deg] overflow-hidden">
-         <div className="absolute top-0 right-1/2 translate-x-1/2 -translate-y-1/2 w-32 h-8 bg-hotpink/80 z-20 rotate-[2deg] pointer-events-none"></div>
+      <div className="relative flex-1 aspect-[3/4] bg-white border-4 border-black sticker-shadow rotate-[1deg]">
+         {/* Top Tape (Pink) - Absolute to parent, breaking out of box */}
+         <div className="absolute top-0 right-1/2 translate-x-1/2 -translate-y-1/2 w-32 h-8 bg-hotpink/90 z-[70] rotate-[2deg] pointer-events-none border-t border-b border-white/20 border-l border-r border-transparent shadow-md backdrop-blur-sm"></div>
          
          <canvas ref={canvasRef} className="hidden" />
 
-         <div className="w-full h-full flex items-center justify-center bg-paper relative group">
+         {/* Inner Content Wrapper - Overflow Hidden applied HERE */}
+         <div className="w-full h-full overflow-hidden relative group bg-paper">
             {generatedResult ? (
               <>
                  <img src={generatedResult.imageUrl} className="w-full h-full object-cover" alt="Generated Ad" />
                  
-                 {/* Visual Text Overlay */}
-                 {showAdText && (
-                   <div className="absolute inset-0 z-20 pointer-events-none overflow-hidden flex flex-col justify-between p-6">
-                      <div className="flex flex-col items-start gap-4 mt-4">
-                        <h2 
-                          className="text-5xl md:text-7xl font-display font-black text-white uppercase leading-[0.85] tracking-tighter break-words text-left max-w-full origin-left -rotate-1"
-                          style={{ 
-                            textShadow: '4px 4px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000' 
-                          }}
-                        >
-                          {adText.headline}
-                        </h2>
-                        <div className="bg-highlighter border-2 border-black px-4 py-1 rotate-[-2deg] shadow-[4px_4px_0_rgba(0,0,0,1)]">
-                          <p className="font-serif italic font-bold text-xl md:text-2xl text-black">
-                            {adText.subhead}
-                          </p>
-                        </div>
-                      </div>
-                      
-                      <div className="self-end mb-24 rotate-[-3deg]">
-                         <div className="bg-hotpink border-4 border-black px-6 py-3 shadow-[6px_6px_0_rgba(0,0,0,1)]">
-                            <span className="font-display font-black text-white text-xl md:text-2xl tracking-widest uppercase">
-                              {adText.cta}
-                            </span>
-                         </div>
-                      </div>
-                   </div>
-                 )}
-
-                 {/* Text Editor Input Panel (Visible when showAdText is true) */}
-                 {showAdText && (
-                   <div className="absolute bottom-[80px] left-1/2 -translate-x-1/2 w-[90%] bg-white/95 backdrop-blur-md border-2 border-black p-3 z-[90] shadow-lg flex flex-col gap-2">
-                      <div className="flex justify-between items-center border-b border-black/10 pb-1">
-                        <span className="font-mono text-[10px] font-bold uppercase text-gray-500">Ad Copy Editor</span>
-                        <button onClick={() => setShowAdText(false)}><X className="w-4 h-4" /></button>
-                      </div>
-                      <input 
-                        className="w-full bg-transparent border-b border-black/20 font-display font-bold uppercase placeholder-gray-400 focus:outline-none focus:border-black"
-                        placeholder="HEADLINE"
-                        value={adText.headline}
-                        onChange={e => setAdText({...adText, headline: e.target.value})}
-                      />
-                      <input 
-                        className="w-full bg-transparent border-b border-black/20 font-serif italic placeholder-gray-400 focus:outline-none focus:border-black"
-                        placeholder="Subhead"
-                        value={adText.subhead}
-                        onChange={e => setAdText({...adText, subhead: e.target.value})}
-                      />
-                      <input 
-                        className="w-full bg-transparent border-b border-black/20 font-display font-bold text-sm text-hotpink placeholder-hotpink/50 focus:outline-none focus:border-hotpink"
-                        placeholder="CTA BUTTON"
-                        value={adText.cta}
-                        onChange={e => setAdText({...adText, cta: e.target.value})}
-                      />
-                   </div>
-                 )}
-
                  {/* Action Bar */}
                  <div className="absolute bottom-4 left-0 w-full z-[100] flex justify-center gap-2 px-4 pointer-events-auto">
+                    {/* STUDIO BUTTON - MAIN ACTION */}
+                    <button 
+                       type="button"
+                       onClick={() => setShowDesignStudio(true)}
+                       className="flex-1 p-3 bg-highlighter border-2 border-black sticker-shadow hover:bg-[#E6E600] transition-colors flex items-center justify-center gap-2 font-display font-bold uppercase tracking-wide text-lg"
+                       title="Remix Studio"
+                    >
+                       <Zap className="w-5 h-5" /> Remix Studio
+                    </button>
+
                     <button 
                       onClick={handleDownload} 
-                      className="flex-1 flex items-center justify-center gap-2 bg-highlighter border-2 border-black p-3 font-bold hover:bg-[#E6E600] sticker-shadow text-sm uppercase"
+                      className="p-3 bg-white border-2 border-black sticker-shadow hover:bg-gray-100 transition-colors"
+                      title="Quick Save"
                     >
-                       <Download className="w-4 h-4" /> Save {showAdText ? 'Poster' : 'Clean'}
-                    </button>
-                    
-                    {/* Toggle Text Mode Button */}
-                    <button 
-                       onClick={() => setShowAdText(!showAdText)}
-                       className={`p-3 border-2 border-black sticker-shadow transition-colors ${showAdText ? 'bg-electric text-white' : 'bg-white text-black hover:bg-gray-100'}`}
-                    >
-                       <Type className="w-4 h-4" />
+                       <Download className="w-5 h-5" />
                     </button>
                  </div>
 
@@ -787,10 +644,10 @@ const MagicLens: React.FC<MagicLensProps> = ({ currentUser }) => {
                 </button>
               </div>
             )}
-         </div>
-
-         <div className="absolute top-4 left-4 bg-white text-black font-mono text-xs px-2 py-1 border border-black/10 z-30">
-            STEP 02: EDITORIAL
+            
+            <div className="absolute top-4 left-4 bg-white text-black font-mono text-xs px-2 py-1 border border-black/10 z-30">
+                STEP 02: EDITORIAL
+            </div>
          </div>
       </div>
     </div>
